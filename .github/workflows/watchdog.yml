@@ -37,7 +37,8 @@ jobs:
           failed=()
 
           # This repo's logs are public: curl errors can name an IP and bodies can
-          # say anything, so both go only to the private issue. gh's stdout too.
+          # say anything, so both go only to the private issue. gh writes the issue
+          # number and title to stdout or stderr, so its writes stay silent.
           probe() {
             local url=$1 attempt code host
             : >"$response"
@@ -64,24 +65,24 @@ jobs:
           if [ "${#failed[@]}" = 0 ]; then
             [ -n "$issue" ] || exit 0
             opened=$(gh issue view "$issue" --json createdAt --jq .createdAt)
-            gh issue close "$issue" --comment "recovered at $now, down for $(( ($(date -u +%s) - $(date -d "$opened" +%s)) / 60 )) min" >/dev/null
+            gh issue close "$issue" --comment "recovered at $now, down for $(( ($(date -u +%s) - $(date -d "$opened" +%s)) / 60 )) min" >/dev/null 2>&1
             exit 0
           fi
 
           body=$(printf 'Last check: %s\n\n~~~\n%s\n%s\n~~~\n' "$now" "$(cat "$public")" "$(cat "$private")")
 
           if [ -z "$issue" ]; then
-            gh label create incident --color d73a4a --description 'Opened and closed by the watchdog workflow' --force >/dev/null
-            gh issue create --label incident --title "$(IFS=,; echo "${failed[*]}") is down since $now" --body "$body" >/dev/null
+            gh label create incident --color d73a4a --description 'Opened and closed by the watchdog workflow' --force >/dev/null 2>&1
+            gh issue create --label incident --title "$(IFS=,; echo "${failed[*]}") is down since $now" --body "$body" >/dev/null 2>&1
             # The token is the owner's, and GitHub sends no email for your own issue.
             # Failing this one run is what emails them; later runs stay green.
             exit 1
           fi
 
-          gh issue edit "$issue" --body "$body" >/dev/null
+          gh issue edit "$issue" --body "$body" >/dev/null 2>&1
           last=$(gh issue view "$issue" --json createdAt,comments --jq '(.comments | last | .createdAt) // .createdAt')
           if (( $(date -u +%s) - $(date -d "$last" +%s) >= 1800 )); then
-            gh issue comment "$issue" --body "still down at $now" >/dev/null
+            gh issue comment "$issue" --body "still down at $now" >/dev/null 2>&1
           fi
 
   # GitHub disables schedules after 60 days of repo inactivity; enabling the
