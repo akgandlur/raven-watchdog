@@ -2,7 +2,7 @@ name: watchdog
 
 on:
   schedule:
-    - cron: '*/5 * * * *'
+    - cron: '3-58/5 * * * *'
     - cron: '23 4 1,15 * *'
   workflow_dispatch:
     inputs:
@@ -88,7 +88,7 @@ jobs:
   # GitHub disables schedules after 60 days of repo inactivity; enabling the
   # workflow resets that clock without a commit.
   keepalive:
-    if: github.event.schedule != '*/5 * * * *'
+    if: github.event.schedule != '3-58/5 * * * *'
     runs-on: ubuntu-latest
     timeout-minutes: 2
     permissions:
