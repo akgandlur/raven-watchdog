@@ -1,0 +1,99 @@
+name: watchdog
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+    - cron: '23 4 1,15 * *'
+  workflow_dispatch:
+    inputs:
+      RAVEN_HEALTH_URL:
+        description: Health URL to check. Point it at a dead URL to test the incident flow.
+        default: https://api.onraven.co/health
+
+permissions: {}
+
+concurrency:
+  group: watchdog
+  cancel-in-progress: false
+
+jobs:
+  check:
+    if: github.event.schedule != '23 4 1,15 * *'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ secrets.RAVEN_CORE_ISSUES_TOKEN }}
+      GH_REPO: akgandlur/raven-core
+      HEALTH_URL: ${{ inputs.RAVEN_HEALTH_URL || 'https://api.onraven.co/health' }}
+      APP_URL: https://app.onraven.co/
+    steps:
+      - name: Check production and update the incident issue
+        shell: bash
+        run: |
+          now=$(date -u +%FT%TZ)
+          public=$(mktemp)
+          private=$(mktemp)
+          response=$(mktemp)
+          failed=()
+
+          # This repo's logs are public: curl errors can name an IP and bodies can
+          # say anything, so both go only to the private issue. gh's stdout too.
+          probe() {
+            local url=$1 attempt code host
+            : >"$response"
+            for attempt in 1 2 3; do
+              [ "$attempt" = 1 ] || sleep 10
+              code=$(curl -sS --max-time 10 -o "$response" -w '%{http_code}' "$url" 2>>"$private") || true
+              if [ "$code" = 200 ] && { [ "$url" != "$HEALTH_URL" ] || jq -e '.status == "ok"' "$response" >/dev/null 2>&1; }; then
+                return 0
+              fi
+              echo "$url attempt $attempt: HTTP $code" >>"$public"
+            done
+            head -c 300 "$response" >>"$private"
+            echo >>"$private"
+            host=${url#*://}
+            failed+=("${host%%/*}")
+          }
+
+          probe "$HEALTH_URL"
+          probe "$APP_URL"
+          cat "$public"
+
+          issue=$(gh issue list --label incident --state open --limit 1 --json number --jq '.[0].number // empty')
+
+          if [ "${#failed[@]}" = 0 ]; then
+            [ -n "$issue" ] || exit 0
+            opened=$(gh issue view "$issue" --json createdAt --jq .createdAt)
+            gh issue close "$issue" --comment "recovered at $now, down for $(( ($(date -u +%s) - $(date -d "$opened" +%s)) / 60 )) min" >/dev/null
+            exit 0
+          fi
+
+          body=$(printf 'Last check: %s\n\n~~~\n%s\n%s\n~~~\n' "$now" "$(cat "$public")" "$(cat "$private")")
+
+          if [ -z "$issue" ]; then
+            gh label create incident --color d73a4a --description 'Opened and closed by the watchdog workflow' --force >/dev/null
+            gh issue create --label incident --title "$(IFS=,; echo "${failed[*]}") is down since $now" --body "$body" >/dev/null
+            # The token is the owner's, and GitHub sends no email for your own issue.
+            # Failing this one run is what emails them; later runs stay green.
+            exit 1
+          fi
+
+          gh issue edit "$issue" --body "$body" >/dev/null
+          last=$(gh issue view "$issue" --json createdAt,comments --jq '(.comments | last | .createdAt) // .createdAt')
+          if (( $(date -u +%s) - $(date -d "$last" +%s) >= 1800 )); then
+            gh issue comment "$issue" --body "still down at $now" >/dev/null
+          fi
+
+  # GitHub disables schedules after 60 days of repo inactivity; enabling the
+  # workflow resets that clock without a commit.
+  keepalive:
+    if: github.event.schedule != '*/5 * * * *'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      actions: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Reset the inactivity clock
+        run: gh api -X PUT "repos/$GITHUB_REPOSITORY/actions/workflows/watchdog.yml/enable"
